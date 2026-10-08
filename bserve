@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+import sys
+import os
+import socket
+
+STATIC_TABLE = {
+    1: ":path",
+    2: ":status",
+    3: "content-type",
+    4: "content-length",
+    5: "host",
+    6: "user-agent",
+    7: "accept",
+    8: "server",
+    9: "connection",
+    10: "date",
+}
+NAME_TO_INDEX = {v: k for k, v in STATIC_TABLE.items()}
+
+FRAME_REQUEST = 0x01
+FRAME_RESPONSE = 0x02
+
+CONTENT_TYPES = {
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".json": "application/json",
+    ".txt": "text/plain",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+}
+
+
+class FrameError(Exception):
+    pass
+
+
+def read_exact(conn, n):
+    data = b""
+    while len(data) < n:
+        chunk = conn.recv(n - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+
+def read_frame(conn):
+    header = read_exact(conn, 9)
+    if header is None:
+        return None
+    length = int.from_bytes(header[0:3], "big")
+    ftype = header[3]
+    flags = header[4]
+    payload = read_exact(conn, length)
+    if payload is None:
+        return None
+    return ftype, flags, payload
+
+
+def write_frame(conn, ftype, flags, payload):
+    header = len(payload).to_bytes(3, "big") + bytes([ftype, flags]) + (0).to_bytes(4, "big")
+    conn.sendall(header + payload)
+
+
+def encode_header_field(name, value):
+    value_bytes = value.encode("utf-8")
+    index = NAME_TO_INDEX.get(name, 0)
+    if index:
+        return bytes([index]) + len(value_bytes).to_bytes(2, "big") + value_bytes
+    name_bytes = name.encode("ascii")
+    return (
+        bytes([0])
+        + len(name_bytes).to_bytes(2, "big")
+        + name_bytes
+        + len(value_bytes).to_bytes(2, "big")
+        + value_bytes
+    )
+
+
+def encode_headers(headers):
+    out = bytes([len(headers)])
+    for name, value in headers:
+        out += encode_header_field(name, value)
+    return out
+
+
+def decode_headers(buf, offset, count):
+    headers = []
+    for _ in range(count):
+        if offset >= len(buf):
+            raise FrameError("truncated header")
+        index = buf[offset]
+        offset += 1
+        if index == 0:
+            if offset + 2 > len(buf):
+                raise FrameError("truncated name length")
+            name_len = int.from_bytes(buf[offset:offset + 2], "big")
+            offset += 2
+            if offset + name_len > len(buf):
+                raise FrameError("truncated name")
+            name = buf[offset:offset + name_len].decode("ascii")
+            offset += name_len
+        else:
+            if index not in STATIC_TABLE:
+                raise FrameError("bad header index")
+            name = STATIC_TABLE[index]
+        if offset + 2 > len(buf):
+            raise FrameError("truncated value length")
+        value_len = int.from_bytes(buf[offset:offset + 2], "big")
+        offset += 2
+        if offset + value_len > len(buf):
+            raise FrameError("truncated value")
+        value = buf[offset:offset + value_len].decode("utf-8")
+        offset += value_len
+        headers.append((name, value))
+    return headers, offset
+
+
+def parse_request(payload):
+    if len(payload) < 4:
+        raise FrameError("short request")
+    method = payload[0]
+    if method != 0x00:
+        raise FrameError("bad method")
+    path_len = int.from_bytes(payload[1:3], "big")
+    offset = 3
+    if offset + path_len > len(payload):
+        raise FrameError("truncated path")
+    path = payload[offset:offset + path_len].decode("utf-8")
+    offset += path_len
+    if not path.startswith("/"):
+        raise FrameError("bad path")
+    if offset >= len(payload):
+        raise FrameError("missing header count")
+    header_count = payload[offset]
+    offset += 1
+    headers, offset = decode_headers(payload, offset, header_count)
+    return path, headers
+
+
+def guess_content_type(path):
+    _, ext = os.path.splitext(path)
+    return CONTENT_TYPES.get(ext.lower(), "application/octet-stream")
+
+
+def resolve_path(root, path):
+    rel = path.lstrip("/")
+    if rel == "":
+        rel = "index.html"
+    if os.path.isabs(rel) or os.path.splitdrive(rel)[0]:
+        return None
+    root_abs = os.path.abspath(root)
+    target_abs = os.path.abspath(os.path.join(root_abs, rel))
+    try:
+        if os.path.commonpath([root_abs, target_abs]) != root_abs:
+            return None
+    except ValueError:
+        return None
+    return target_abs
+
+
+def build_response(status, content_type, body):
+    headers = [("content-type", content_type), ("content-length", str(len(body)))]
+    return status.to_bytes(2, "big") + encode_headers(headers) + body
+
+
+def send_status(conn, status, content_type, body):
+    write_frame(conn, FRAME_RESPONSE, 0, build_response(status, content_type, body))
+
+
+def handle_request(conn, root, path):
+    target = resolve_path(root, path)
+    if target is None or not os.path.isfile(target):
+        send_status(conn, 404, "text/plain", b"Not Found")
+        return
+    try:
+        with open(target, "rb") as f:
+            body = f.read()
+    except OSError:
+        send_status(conn, 404, "text/plain", b"Not Found")
+        return
+    send_status(conn, 200, guess_content_type(target), body)
+
+
+def serve_connection(conn, root):
+    while True:
+        frame = read_frame(conn)
+        if frame is None:
+            return
+        ftype, flags, payload = frame
+        if ftype != FRAME_REQUEST:
+            continue
+        try:
+            path, headers = parse_request(payload)
+        except (FrameError, UnicodeDecodeError):
+            send_status(conn, 400, "text/plain", b"Bad Request")
+            continue
+        handle_request(conn, root, path)
+
+
+def main():
+    if len(sys.argv) != 3:
+        print("usage: bserve <root> <port>", file=sys.stderr)
+        sys.exit(1)
+    root = sys.argv[1]
+    port = int(sys.argv[2])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("", port))
+    sock.listen(5)
+    print("bserve listening on :%d, root=%s" % (port, root))
+    while True:
+        conn, addr = sock.accept()
+        try:
+            serve_connection(conn, root)
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+
+if __name__ == "__main__":
+    main()
