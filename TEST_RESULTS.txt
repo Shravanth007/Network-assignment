@@ -1,0 +1,19 @@
+$ python -m unittest test_bserve -v
+test_200_serves_file (test_bserve.BServeTest.test_200_serves_file) ... ok
+test_400_bad_method (test_bserve.BServeTest.test_400_bad_method) ... ok
+test_400_invalid_utf8_path (test_bserve.BServeTest.test_400_invalid_utf8_path) ... ok
+test_400_keeps_connection_open (test_bserve.BServeTest.test_400_keeps_connection_open) ... ok
+test_400_short_frame (test_bserve.BServeTest.test_400_short_frame) ... ok
+test_404_cross_drive_path_does_not_crash (test_bserve.BServeTest.test_404_cross_drive_path_does_not_crash) ... ok
+test_404_missing_file (test_bserve.BServeTest.test_404_missing_file) ... ok
+test_404_path_traversal_blocked (test_bserve.BServeTest.test_404_path_traversal_blocked) ... ok
+test_connection_serves_many_requests (test_bserve.BServeTest.test_connection_serves_many_requests) ... ok
+test_nested_file (test_bserve.BServeTest.test_nested_file) ... ok
+test_root_path_maps_to_index (test_bserve.BServeTest.test_root_path_maps_to_index) ... ok
+test_server_accepts_a_new_connection_after_one_closes (test_bserve.BServeTest.test_server_accepts_a_new_connection_after_one_closes) ... ok
+test_unknown_frame_type_is_skipped (test_bserve.BServeTest.test_unknown_frame_type_is_skipped) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.599s
+
+OK
